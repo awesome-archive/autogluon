@@ -1,24 +1,25 @@
 autogluon.model_zoo
 ===================
 
-Pretrained Models discovered via Neural Architecture Search
+Here we provide pretrained Models discovered via Neural Architecture Search
 
 How To Use Pretrained Models
 ----------------------------
 
 
-How to load pretrained 'efficientnet_b0'.
+Example showing how to load pretrained network 'efficientnet_b0', which was produced via NAS.
 
 .. code-block:: python
 
-   import autogluon as ag
+   import autogluon.core as ag
    model = ag.model_zoo.get_model('efficientnet_b0', pretrained=True)
 
 
 EfficientNet
 ------------
 
-The pretrained EfficientNet [1]_ models are provided.
+The following pretrained EfficientNet [1]_ models are provided for image classification.
+The accuracy achieved by each model on a popular image classification benchmark is indicated, along with the image crop-size used by each model.
 
 .. [1] Tan, Mingxing, and Quoc V. Le. \
        "EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks.
@@ -44,14 +45,14 @@ The pretrained EfficientNet [1]_ models are provided.
 +---------------------------+--------+-----------+
 
 
-How to reproduce search on EfficientNet?
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+How to reproduce EfficientNet's neural architecture search
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. code-block:: python
 
    import math
-   import autogluon as ag
-   from autogluon import ImageClassification as task
+   import autogluon.core as ag
+   from autogluon.vision import ImagePredictor as Task
 
    @ag.obj(
        width_coefficient=ag.space.Categorical(1.1, 1.2),
@@ -65,6 +66,6 @@ How to reproduce search on EfficientNet?
                             depth_coefficient=depth_coefficient,
                             input_size=input_size)
 
-   task.fit('imagenet', net=EfficientNetB1(), search_strategy='grid',
-            optimizer=ag.optimizer.SGD(learning_rate=1e-1, momentum=0.9, wd=1e-4))
-
+   task = Task()
+   task.fit('imagenet', search_strategy='grid',
+            hyperparameters={'net': EfficientNetB1(), 'optimizer':ag.optimizer.SGD(learning_rate=1e-1, momentum=0.9, wd=1e-4)})

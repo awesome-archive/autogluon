@@ -1,21 +1,21 @@
-AutoGluon: AutoML Toolkit for Deep Learning
-===========================================
+AutoGluon: AutoML for Text, Image, and Tabular Data
+====================================================
 
-`AutoGluon` enables easy-to-use and easy-to-extend AutoML with a focus on deep learning and real-world applications spanning image, text, or tabular data. Intended for both ML beginners and experts, `AutoGluon` enables you to:
+`AutoGluon` enables easy-to-use and easy-to-extend AutoML with a focus on automated stack ensembling, deep learning, and real-world applications spanning text, image, and tabular data. Intended for both ML beginners and experts, `AutoGluon` enables you to:
 
-- Quickly prototype deep learning solutions for your data with few lines of code.
-- Leverage automatic hyperparameter tuning, model selection / architecture search, and data processing.
-- Automatically utilize state-of-the-art deep learning techniques without expert knowledge.
-- Easily improve existing bespoke models and data pipelines, or customize `AutoGluon` for your use-case.
+- Quickly prototype deep learning and classical ML solutions for your raw data with a few lines of code.
+- Automatically utilize state-of-the-art techniques (where appropriate) without expert knowledge.
+- Leverage automatic hyperparameter tuning, model selection/ensembling, architecture search, and data processing.
+- Easily improve/tune your bespoke models and data pipelines, or customize `AutoGluon` for your use-case.
 
 .. note::
 
-   Example using AutoGluon to train and deploy high-performance model on a tabular dataset:
-   
-   >>> from autogluon import TabularPrediction as task
-   >>> predictor = task.fit(train_data=task.Dataset(file_path=TRAIN_DATA.csv), label_column=COLUMN_NAME)
-   >>> predictions = predictor.predict(task.Dataset(file_path=TEST_DATA.csv))
-   
+   Example using AutoGluon to train and deploy a high-performance model on a tabular dataset:
+
+   >>> from autogluon.tabular import TabularPredictor
+   >>> predictor = TabularPredictor(label=COLUMN_NAME).fit(train_data=TRAIN_DATA.csv)
+   >>> predictions = predictor.predict(TEST_DATA.csv)
+
    AutoGluon can be applied just as easily for prediction tasks with image or text data.
 
 
@@ -43,11 +43,11 @@ Tutorials
       How to predict variables in tabular datasets.
 
    .. card::
-      :title: Image Classification
-      :link: tutorials/image_classification/index.html
+      :title: Image Prediction
+      :link: tutorials/image_prediction/index.html
 
       How to classify images into various categories.
-    
+
    .. card::
       :title: Object Detection
       :link: tutorials/object_detection/index.html
@@ -55,10 +55,10 @@ Tutorials
       How to detect objects and their location in images.
 
    .. card::
-      :title: Text Classification
-      :link: tutorials/text_classification/index.html
+      :title: Text Prediction
+      :link: tutorials/text_prediction/index.html
 
-      How to make predictions based on text data.
+      How to solve NLP problems via supervised learning from raw text.
 
 
 Advanced Topics
@@ -67,10 +67,10 @@ Advanced Topics
 .. container:: cards
 
    .. card::
-      :title: Customize AutoGluon
+      :title: Tune Custom Models
       :link: tutorials/course/index.html
 
-      Advanced usage of AutoGluon APIs for customized applications.
+      How to hyperparameter-tune your own custom models or Python code.
 
    .. card::
       :title: Neural Architecture Search
@@ -89,16 +89,18 @@ Advanced Topics
    :hidden:
 
    tutorials/tabular_prediction/index
-   tutorials/image_classification/index
+   tutorials/image_prediction/index
    tutorials/object_detection/index
-   tutorials/text_classification/index
+   tutorials/text_prediction/index
    tutorials/course/index
    tutorials/nas/index
    tutorials/torch/index
-   api/autogluon.space
+   api/autogluon.predictor
    api/autogluon.core
-   api/autogluon.task
-   api/autogluon.scheduler
-   api/autogluon.searcher
-   api/autogluon.utils
+   api/autogluon.core.space
+   api/autogluon.core.scheduler
+   api/autogluon.core.searcher
+   api/autogluon.core.utils
+   api/autogluon.features
+   api/autogluon.tabular.models
    model_zoo/index

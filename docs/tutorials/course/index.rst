@@ -1,7 +1,7 @@
-Customize AutoGluon
+Tune Custom Models
 ===================
 
-Tutorials for customizing AutoGluon using advanced APIs.
+Tutorials to hyperparameter-tune any custom models or Python code.
 
 .. container:: cards
    
@@ -9,35 +9,39 @@ Tutorials for customizing AutoGluon using advanced APIs.
       :title: Search Space and Decorator
       :link: core.html
 
-      Learn how to use the AutoGluon Core API for customized search spaces,
-      customize searchable objects, and training functions.
+      Using AutoGluon's Core APIs to hyperparameter-tune any model/code by making existing objects/training-functions 
+      searchable.
 
    .. card::
       :title: Search Algorithms
       :link: algorithm.html
 
-      Learn how to use AutoGluon built-in search algorithms and
-      early-stopping scheduling strategy.
+      How to use AutoGluon's built-in hyperparameter search algorithms, 
+      including early-stopping strategies.
 
    .. card::
-      :title: Searchable Customized Objects
+      :title: Searchable Objects
       :link: object.html
 
-      Hyperparameter search in customized objects, such as network,
-      dataset, and etc.
+      Tune the hyperparameters of custom objects such as your own: neural network, optimizer, dataset, etc.
 
    .. card::
-      :title: Bring Your Own Training Scripts
+      :title: Tune Training Scripts
       :link: script.html
 
-      Bring any python scripts into AutoGluon for HPO.
+      Tune the argument values (hyperparameters) of arbitrary Python scripts using AutoGluon.
 
    .. card::
-      :title: Distributed Search Tutorial
-      :link: distributed.md
+      :title: Distributed Search
+      :link: distributed.html
 
-      Easily scale up training across multiple machines using
-      automatic distributed search.
+      Easily distribute the hyperparameter search across multiple machines to improve efficiency.
+   
+   .. card::
+      :title: Example: Tune a Multi-Layer Perceptron
+      :link: mlp.html
+
+      Complete example of using AutoGluon's state-of-the-art hyperparameter optimization to tune a basic MLP model.
 
 .. toctree::
    :maxdepth: 1
@@ -48,3 +52,4 @@ Tutorials for customizing AutoGluon using advanced APIs.
    object
    script
    distributed
+   mlp

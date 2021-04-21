@@ -1,43 +1,42 @@
 # Search Algorithms
 :label:`course_alg`
 
-## AutoGluon System Implementatin Logic
+## AutoGluon System Implementation Logic
 
 ![](https://raw.githubusercontent.com/zhanghang1989/AutoGluonWebdata/master/doc/api/autogluon_system.png)
 
-AutoGluon system includes Searcher, Scheduler and Resource Manager:
+Important components of the AutoGluon system include the Searcher, Scheduler and Resource Manager:
 
-- The Searcher suggests configurations for the next training jobs.
-- Scheduler schedules the training job when the computation resources are available.
+- The Searcher suggests hyperparameter configurations for the next training job.
+- The Scheduler runs the training job when computation resources become available.
 
-In this tutorial, we illustrate how the search algorithm works and
-compare the performance on a toy experiments.
+In this tutorial, we illustrate how various search algorithms work and
+compare their performance via toy experiments.
 
 ## FIFO Scheduling vs. Early Stopping
 
-In this section, we compare the different behaviors of a sequential First In, First Out (FIFO) scheduling
-using :class:`autogluon.scheduler.FIFOScheduler` vs. a preemptive scheduling algorithm
-:class:`autogluon.scheduler.HyperbandScheduler` that terminates the trial with bad
-configurations at the early/middle stages.
+In this section, we compare the different behaviors of a sequential First In, First Out (FIFO) scheduler using :class:`autogluon.core.scheduler.FIFOScheduler` vs. a preemptive scheduling algorithm
+:class:`autogluon.core.scheduler.HyperbandScheduler` that early-terminates certain training jobs that do not appear promising during their early stages.
 
 ### Create a Dummy Training Function
 
 ```{.python .input}
 import numpy as np
-import autogluon as ag
+import autogluon.core as ag
 
 @ag.args(
     lr=ag.space.Real(1e-3, 1e-2, log=True),
-    wd=ag.space.Real(1e-3, 1e-2))
+    wd=ag.space.Real(1e-3, 1e-2),
+    epochs=10)
 def train_fn(args, reporter):
-    for e in range(10):
+    for e in range(args.epochs):
         dummy_accuracy = 1 - np.power(1.8, -np.random.uniform(e, 2*e))
-        reporter(epoch=e, accuracy=dummy_accuracy, lr=args.lr, wd=args.wd)
+        reporter(epoch=e+1, accuracy=dummy_accuracy, lr=args.lr, wd=args.wd)
 ```
 
 ### FIFO Scheduler
 
-This scheduler runs training trials in order.
+This scheduler runs training trials in order. When there are more resources available than required for a single training job, multiple training jobs may be run in parallel.
 
 ```{.python .input}
 scheduler = ag.scheduler.FIFOScheduler(train_fn,
@@ -58,25 +57,35 @@ scheduler.get_training_curves(plot=True, use_legend=False)
 
 ### Hyperband Scheduler
 
-The Hyperband Scheduler terminates training trials that don't appear promising during the early stages to free up compute resources for more promising hyperparameter configurations.
+AutoGluon implements different variants of Hyperband scheduling, as selected by `type`. In the `stopping` variant (the default), the scheduler terminates training trials that don't appear promising during the early stages to free up compute resources for more promising hyperparameter configurations.
 
 ```{.python .input}
 scheduler = ag.scheduler.HyperbandScheduler(train_fn,
                                             resource={'num_cpus': 2, 'num_gpus': 0},
-                                            num_trials=20,
+                                            num_trials=100,
                                             reward_attr='accuracy',
                                             time_attr='epoch',
-                                            grace_period=1)
+                                            grace_period=1,
+                                            reduction_factor=3,
+                                            type='stopping')
 scheduler.run()
 scheduler.join_jobs()
 
 ```
 
+In this example, trials are stopped early after 1, 3, or 9 epochs. Only a small
+fraction of the most promising jobs run for the full number of 10 epochs. Since the
+majority of trials are stopped early, we can afford a larger `num_trials`.
 Visualize the results:
 
 ```{.python .input}
 scheduler.get_training_curves(plot=True, use_legend=False)
 ```
+
+Note that `HyperbandScheduler` needs to know the maximum number of epochs. This
+can be passed as `max_t` argument. If it is missing (as above), it is inferred
+from `train_fn.args.epochs` (which is set by `epochs=10` in the example above)
+or from `train_fn.args.max_t` otherwise.
 
 ## Random Search vs. Reinforcement Learning
 

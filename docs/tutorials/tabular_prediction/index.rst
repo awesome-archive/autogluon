@@ -10,7 +10,7 @@ For standard datasets that are represented as tables (stored as CSV file, parque
       :title: Quick Start Using FIT
       :link: tabular-quickstart.html
 
-      Quick tutorial on fitting models with tabular datasets.
+      5 min tutorial on fitting models with tabular datasets.
 
    .. card::
       :title: In-depth FIT Tutorial
@@ -22,7 +22,26 @@ For standard datasets that are represented as tables (stored as CSV file, parque
       :title: Kaggle Tutorial
       :link: tabular-kaggle.html
 
-      How to use AutoGluon for Kaggle competitions.
+      Using AutoGluon for Kaggle competitions with tabular data.
+
+   .. card::
+      :title: Data Tables Containing Text
+      :link: tabular-multimodal-text-others.html
+
+      Modeling data tables with text and numeric/categorical features.
+
+   .. card::
+      :title: Multi-Label Prediction
+      :link: tabular-multilabel.html
+
+      How to predict multiple columns in a data table.
+
+
+   .. card::
+      :title: FAQ
+      :link: tabular-faq.html
+
+      Frequently asked questions about AutoGluon-Tabular.
 
 .. toctree::
    :maxdepth: 1
@@ -31,3 +50,6 @@ For standard datasets that are represented as tables (stored as CSV file, parque
    tabular-quickstart
    tabular-indepth
    tabular-kaggle
+   tabular-multimodal-text-others
+   tabular-multilabel
+   tabular-faq

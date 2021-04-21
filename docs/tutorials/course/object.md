@@ -1,13 +1,12 @@
-# Customize User Objects
+# Searchable Objects
 :label:`sec_customobj`
 
-A user may want to define some customized objects with search spaces, such as network architectures,
-or specialized optimizers. We provide an API to do that.
+When defining custom Python objects such as network architectures,
+or specialized optimizers, it may be hard to decide what values to set for all of their attributes. AutoGluon provides an API that allows you to instead specify  a search space of possible values to consider for such attributes, within which the optimal value will be automatically searched for at runtime. This tutorial demonstrates how easy this is to do, without having to modify your existing code at all!  
 
 ## Example for Constructing a Network
 
-This is an example of doing architecture search as HPO. If you are interested in efficient neural
-architecture search, please refer another tutorial `sec_proxyless`_ .
+This tutorial covers an example of selecting a neural network's architecture as a hyperparameter optimization (HPO) task. If you are interested in efficient neural architecture search (NAS), please refer to this other tutorial instead: `sec_proxyless`_ .
 
 ### CIFAR ResNet in GluonCV
 
@@ -24,8 +23,10 @@ net = CIFARResNetV1(CIFARBasicBlockV1, layers, channels)
 We can visualize the network:
 
 ```{.python .input}
-import autogluon as ag
-ag.utils.plot_network(net, (1, 3, 32, 32))
+import autogluon.core as ag
+from autogluon.vision.utils import plot_network
+
+plot_network(net, (1, 3, 32, 32))
 ```
 
 ### Searchable Network Architecture Using AutoGluon Object
@@ -87,10 +88,10 @@ AutoGluon Object is compatible with Fit API in AutoGluon tasks, and also works w
 scripts using :func:`autogluon.autogluon_register_args`. We can start fitting:
 
 ```{.python .input}
-from autogluon import ImageClassification as task
-# results = task.fit('cifar10', net=mynet, optimizer=myoptim, num_gpus=1, epochs=1)
+from autogluon.vision import ImagePredictor
+classifier = ImagePredictor().fit('cifar10', hyperparameters={'net': mynet, 'optimizer': myoptim, 'epochs': 1}, ngpus_per_trial=1)
 ```
 
 ```{.python .input}
-# print(results)
+print(classifier.fit_summary())
 ```

@@ -7,36 +7,42 @@ describing what they are and what they do. The APIs are grouped into the followi
 .. container:: cards
 
    .. card::
-      :title: Search Space
-      :link: autogluon.space.html
+      :title: Predictors
+      :link: autogluon.predictor.html
 
-      Hyperparameter search spaces describing candidate hyperparameter values.
+      Automatically train/deploy predictors with 1 line of code for text, image, or tabular data.
 
    .. card::
       :title: Core APIs
       :link: autogluon.core.html
 
-      APIs for customizing/extending training jobs.
+      Enable easy tuning of any custom models / Python code.
+
+   .. card::
+      :title: Search Space
+      :link: autogluon.core.space.html
+
+      Hyperparameter search spaces of candidate hyperparameter values to consider.
 
    .. card::
       :title: Schedulers
-      :link: autogluon.scheduler.html
+      :link: autogluon.core.scheduler.html
 
       Schedulers for managing computation resources and distributed training.
 
    .. card::
-      :title: searchers
-      :link: autogluon.searcher.html
+      :title: Searchers
+      :link: autogluon.core.searcher.html
 
-      Search algorithms that automatically suggest which hyperparameter values to try out.
+      Search algorithms that suggest which hyperparameter values to try out.
 
 .. toctree::
    :maxdepth: 2
    :hidden:
 
-   autogluon.space
+   autogluon.predictor
    autogluon.core
-   autogluon.task
-   autogluon.scheduler
-   autogluon.searcher
-   autogluon.utils
+   autogluon.core.space
+   autogluon.core.scheduler
+   autogluon.core.searcher
+   autogluon.core.utils

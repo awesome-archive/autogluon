@@ -1,13 +1,12 @@
-# Customize Training Script
+# Tune Training Scripts
 :label:`sec_customscript`
 
-In this tutorial, we are showing the example of doing HPO using AutoGluon on any customized
-python scripts. AutoGluon is a framework agnostic HPO toolkit, which is compatible with
-any training code written in python. See also :ref:`sec_customstorch`.
+This tutorial demonstrates how to do hyperparameter optimization (HPO) to find optimal argument values of custom 
+Python scripts. AutoGluon is a framework-agnostic HPO toolkit, which is compatible with any training code written in Python. See also :ref:`sec_customstorch`.
 
-## Start with a Fine-tuning Example
+## Neural Network Fine-tuning Example
 
-Import the basic packages, such as numpy, mxnet and gluoncv:
+Import required packages, such as numpy, mxnet and gluoncv:
 
 ```{.python .input}
 import os
@@ -15,7 +14,7 @@ import numpy as np
 
 import mxnet as mx
 from mxnet import gluon, init
-from autogluon.task.image_classification.nets import get_built_in_network
+from autogluon.extra.model_zoo._nets import get_built_in_network
 ```
 
 Define a function for dataset meta data:
@@ -93,7 +92,7 @@ def train_loop(args, reporter):
 
         if reporter is not None:
             # reporter enables communications with autogluon
-            reporter(epoch=epoch, accuracy=val_acc)
+            reporter(epoch=epoch+1, accuracy=val_acc)
         else:
             print('[Epoch %d] Train-acc: %.3f | Val-acc: %.3f' %
                   (epoch, train_acc, val_acc))
@@ -102,8 +101,8 @@ def train_loop(args, reporter):
 ### How to Do HPO Using AutoGluon on any Training Function
 
 ```{.python .input}
-import autogluon as ag
-from autogluon.utils.mxutils import get_data_rec
+import autogluon.core as ag
+from autogluon.mxnet.utils import get_data_rec
 
 @ag.args(
     dataset='apparel',
@@ -139,7 +138,7 @@ print(myscheduler)
 
 ```{.python .input}
 # myscheduler.run()
-# myscheduler.join_tasks()
+# myscheduler.join_jobs()
 ```
 
 Plot the results.

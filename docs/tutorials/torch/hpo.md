@@ -1,4 +1,4 @@
-# MNIST Training in PyTorch
+# Tune PyTorch Model on MNIST
 :label:`sec_customstorch`
 
 In this tutorial, we demonstrate how to do Hyperparameter Optimization (HPO) using AutoGluon with PyTorch.
@@ -91,7 +91,8 @@ def train_mnist(args, reporter):
                 correct += predicted.eq(targets).sum().item()
 
         acc = 100.*correct/total
-        reporter(epoch=epoch, accuracy=acc)
+        # 'epoch' reports the number of epochs done
+        reporter(epoch=epoch+1, accuracy=acc)
 
     for epoch in tqdm(range(0, epochs)):
         train(epoch)
@@ -105,10 +106,10 @@ In this section, we cover how to define a searchable network architecture, conve
 
 Let's define a 'dynamic' network with searchable configurations by simply adding a decorator :func:`autogluon.obj`. In this example, we only search two arguments `hidden_conv` and
 `hidden_fc`, which represent the hidden channels in convolutional layer and fully connected layer. 
-More info about searchable space is available at :meth:`autogluon.space`.
+More info about searchable space is available at :meth:`autogluon.core.space`.
 
 ```{.python .input}
-import autogluon as ag
+import autogluon.core as ag
 
 @ag.obj(
     hidden_conv=ag.space.Int(6, 12),
@@ -150,17 +151,27 @@ def ag_train_mnist(args, reporter):
 ```
 
 
-
 ### Create the Scheduler and Launch the Experiment
 
-```{.python .input}
-myscheduler = ag.scheduler.FIFOScheduler(ag_train_mnist,
-                                         resource={'num_cpus': 4, 'num_gpus': 1},
-                                         num_trials=2,
-                                         time_attr='epoch',
-                                         reward_attr="accuracy")
-print(myscheduler)
+For hyperparameter tuning, AutoGluon provides a number of different schedulers:
 
+- `FIFOScheduler`: Each training jobs runs for the full number of epochs
+- `HyperbandScheduler`: Uses successive halving and Hyperband scheduling in
+   order to stop unpromising jobs early, so that the available budget is allocated
+   more efficiently
+
+Each scheduler is internally configured by a searcher, which determines the choice
+of hyperparameter configurations to be run. The default searcher is `random`:
+configurations are drawn uniformly at random from the search space.
+
+```{.python .input}
+myscheduler = ag.scheduler.FIFOScheduler(
+    ag_train_mnist,
+    resource={'num_cpus': 4, 'num_gpus': 1},
+    num_trials=2,
+    time_attr='epoch',
+    reward_attr='accuracy')
+print(myscheduler)
 ```
 
 ```{.python .input}
@@ -175,3 +186,69 @@ myscheduler.get_training_curves(plot=True,use_legend=False)
 print('The Best Configuration and Accuracy are: {}, {}'.format(myscheduler.get_best_config(),
                                                                myscheduler.get_best_reward()))
 ```
+
+### Search by Bayesian Optimization
+
+While simple to implement, random search is usually not an efficient way to
+propose configurations for evaluation. AutoGluon provides a number of
+model-based searchers:
+
+- Gaussian process based Bayesian optimization (`bayesopt`)
+- SkOpt Bayesian optimization (`skopt`; only with FIFO scheduler)
+
+Here, `skopt` maps to [scikit.optimize](https://scikit-optimize.github.io/stable/),
+whereas `bayesopt` is an own implementation. While `skopt` is currently somewhat
+more versatile (choice of acquisition function, surrogate model), `bayesopt`
+is directly optimized to asynchronous parallel scheduling. Importantly, `bayesopt`
+runs both with FIFO and Hyperband scheduler (while `skopt` is restricted to the
+FIFO scheduler).
+
+When running the following examples, comparing the different schedulers and
+searchers, you need to increase `num_trials` (or use `time_out` instead, which
+specifies the search budget in terms of wall-clock time) in order to see
+differences in performance.
+
+```{.python .input}
+myscheduler = ag.scheduler.FIFOScheduler(
+    ag_train_mnist,
+    resource={'num_cpus': 4, 'num_gpus': 1},
+    searcher='bayesopt',
+    num_trials=2,
+    time_attr='epoch',
+    reward_attr='accuracy')
+print(myscheduler)
+```
+
+```{.python .input}
+myscheduler.run()
+myscheduler.join_jobs()
+```
+
+### Search by Asynchronous BOHB
+
+When training neural networks, it is often more efficient to use early stopping,
+and in particular Hyperband scheduling can save a lot of wall-clock time. AutoGluon
+provides a combination of Hyperband scheduling with asynchronous Bayesian
+optimization (more details can be found [here](https://arxiv.org/abs/2003.10865)):
+
+```{.python .input}
+myscheduler = ag.scheduler.HyperbandScheduler(
+    ag_train_mnist,
+    resource={'num_cpus': 4, 'num_gpus': 1},
+    searcher='bayesopt',
+    num_trials=2,
+    time_attr='epoch',
+    reward_attr='accuracy',
+    grace_period=1,
+    reduction_factor=3,
+    brackets=1)
+print(myscheduler)
+```
+
+```{.python .input}
+myscheduler.run()
+myscheduler.join_jobs()
+```
+
+**Tip**: If you like to learn more about HPO algorithms in AutoGluon, please
+have a look at :ref:`sec_custom_advancedhpo`.

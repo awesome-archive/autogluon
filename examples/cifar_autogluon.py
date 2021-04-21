@@ -1,5 +1,4 @@
 import os
-import numpy as np
 
 import argparse, time, logging
 import mxnet as mx
@@ -7,13 +6,11 @@ from mxnet import gluon
 from mxnet.gluon.data.vision import transforms
 
 from gluoncv.model_zoo import get_model
-from gluoncv.utils import makedirs, LRScheduler
+from gluoncv.utils import LRScheduler
 from gluoncv.data import transforms as gcv_transforms
 
-import autogluon as ag
+import autogluon.core as ag
 
-import ConfigSpace as CS
-import ConfigSpace.hyperparameters as CSH
 
 # CLI
 def parse_args():
@@ -34,7 +31,7 @@ def parse_args():
     return args
 
 
-@ag.autogluon_register_args(
+@ag.args(
     batch_size=64,
     num_workers=2,
     num_gpus=1,
@@ -132,7 +129,7 @@ def train_cifar(args, reporter):
             train_loss /= batch_size * num_batch
             name, acc = train_metric.get()
             name, val_acc = test(ctx, val_data)
-            reporter(epoch=epoch, accuracy=val_acc)
+            reporter(epoch=epoch+1, accuracy=val_acc)
 
     train(args.epochs, context)
 
@@ -167,24 +164,28 @@ if __name__ == '__main__':
 
     train_cifar.update(epochs=args.epochs)
     # create searcher and scheduler
+    extra_node_ips = []
     if args.scheduler == 'hyperband':
         myscheduler = ag.scheduler.HyperbandScheduler(train_cifar,
                                                       resource={'num_cpus': 2, 'num_gpus': args.num_gpus},
                                                       num_trials=args.num_trials,
                                                       checkpoint=args.checkpoint,
                                                       time_attr='epoch', reward_attr="accuracy",
-                                                      max_t=args.epochs, grace_period=args.epochs//4)
+                                                      max_t=args.epochs, grace_period=args.epochs//4,
+                                                      dist_ip_addrs=extra_node_ips)
     elif args.scheduler == 'fifo':
         myscheduler = ag.scheduler.FIFOScheduler(train_cifar,
                                                  resource={'num_cpus': 2, 'num_gpus': args.num_gpus},
                                                  num_trials=args.num_trials,
                                                  checkpoint=args.checkpoint,
-                                                 reward_attr="accuracy")
+                                                 reward_attr="accuracy",
+                                                 dist_ip_addrs=extra_node_ips)
     else:
         raise RuntimeError('Unsuported Scheduler!')
 
+    print(myscheduler)
     myscheduler.run()
-    myscheduler.join_tasks()
+    myscheduler.join_jobs()
     myscheduler.get_training_curves('{}.png'.format(os.path.splitext(args.checkpoint)[0]))
     print('The Best Configuration and Accuracy are: {}, {}'.format(myscheduler.get_best_config(),
                                                                    myscheduler.get_best_reward()))
