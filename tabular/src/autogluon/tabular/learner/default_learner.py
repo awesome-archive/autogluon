@@ -1,0 +1,793 @@
+from __future__ import annotations
+
+import copy
+import logging
+import math
+import time
+
+import numpy as np
+import pandas as pd
+from pandas import DataFrame, Series
+
+from autogluon.common.features.feature_metadata import FeatureMetadata
+from autogluon.common.utils.log_utils import convert_time_in_s_to_log_friendly
+from autogluon.core.constants import AUTO_WEIGHT, BALANCE_WEIGHT, BINARY, MULTICLASS, QUANTILE, REGRESSION
+from autogluon.core.data import LabelCleaner
+from autogluon.core.data.cleaner import Cleaner
+from autogluon.core.utils.time import sample_df_for_time_func, time_func
+from autogluon.core.utils.utils import augment_rare_classes, extract_column
+
+from ..trainer import AutoTrainer
+from ..trainer.group_views import (
+    GROUP_KEY_COLUMN,
+    GROUP_ORDER_COLUMN,
+    GroupCollapse,
+    GroupPooling,
+    group_codes,
+    group_key_feature_metadata,
+    group_order,
+)
+from .abstract_learner import AbstractTabularLearner
+
+logger = logging.getLogger(__name__)
+
+
+# TODO: Add functionality for advanced feature generators such as gl_code_matrix_generator (inter-row dependencies, apply to train differently than test, etc., can only run after train/test split, rerun for each cv fold)
+# TODO: - Differentiate between advanced generators that require fit (stateful, gl_code_matrix) and those that do not (bucket label averaging in SCOT GC 2019)
+# TODO: - Those that do not could be added to preprocessing function of model, but would then have to be recomputed on each model.
+# TODO: Add cv / OOF generator option, so that AutoGluon can be used as a base model in an ensemble stacker
+# Learner encompasses full problem, loading initial data, feature generation, model training, model prediction
+class DefaultLearner(AbstractTabularLearner):
+    def __init__(self, trainer_type=AutoTrainer, **kwargs):
+        super().__init__(**kwargs)
+        self.trainer_type = trainer_type
+        self.class_weights = None
+        self._time_fit_total = None
+        self._time_fit_preprocessing = None
+        self._time_fit_training = None
+        self._time_limit = None
+        self.preprocess_1_time = None  # Time required to preprocess 1 row of data
+        self.preprocess_1_batch_size = None  # Batch size used to calculate self.preprocess_1_time
+
+    # TODO: v0.1 Document trainer_fit_kwargs
+    def _fit(
+        self,
+        X: DataFrame,
+        X_val: DataFrame | None = None,
+        X_test: DataFrame | None = None,
+        X_unlabeled: DataFrame | None = None,
+        holdout_frac: float = 0.1,
+        num_bag_folds: int = 0,
+        num_bag_sets: int = 1,
+        time_limit: float | None = None,
+        infer_limit: float | None = None,
+        infer_limit_batch_size: int | None = None,
+        verbosity: int = 2,
+        raise_on_model_failure: bool = False,
+        time_limit_preprocessing: float | None = None,
+        validation_structure=None,
+        no_validation: bool = False,
+        ensemble_weights: dict | None = None,
+        ensemble_weights_missing: str = "error",
+        ensemble_hyperparameters: dict | None = None,
+        validation_folds: int | None = None,
+        validation_folds_time_reserve: float | str = 0.0,
+        group_views: list[str] | None = None,
+        group_pooling: str | GroupPooling | tuple[str | GroupPooling, ...] | None = None,
+        group_view_kinds: tuple[str, ...] | None = None,
+        group_collapse: GroupCollapse | None = None,
+        **trainer_fit_kwargs,
+    ):
+        """Arguments:
+        X (DataFrame): training data
+        X_val (DataFrame): data used for hyperparameter tuning. Note: final model may be trained using this data as well as training data
+        X_test (DataFrame): data used for tracking model performance on test data during training. Note: this data is never used to train the model
+        X_unlabeled (DataFrame): data used for pretraining a model. This is same data format as X, without label-column. This data is used for semi-supervised learning.
+        holdout_frac (float): Fraction of data to hold out for evaluating validation performance (ignored if X_val != None, ignored if kfolds != 0)
+        num_bag_folds (int): kfolds used for bagging of models, roughly increases model training time by a factor of k (0: disabled)
+        num_bag_sets (int): number of repeats of kfold bagging to perform (values must be >= 1),
+            total number of models trained during bagging = num_bag_folds * num_bag_sets
+        time_limit_preprocessing: float | None
+            Time budget for preprocessing. Accepts two forms:
+            - Fraction (0 < value < 1): fraction of the overall time limit. E.g. if time_limit=3600 and
+              time_limit_preprocessing=0.33, preprocessing is allowed up to ~1188s.
+              Requires time_limit to be set; ignored otherwise.
+              The actual preprocessing time is deducted from time_limit when computing the trainer budget.
+            - Seconds (value >= 1): absolute time limit in seconds passed directly to preprocessing.
+              The overall time_limit for the trainer is unaffected (preprocessing time is not deducted).
+            If None, no time limit is placed on preprocessing.
+            This time limit is not strictly enforced and is only passed to parts of the preprocessing
+            pipeline that support time limits.
+        """
+        # TODO: if provided, feature_types in X, X_val are ignored right now, need to pass to Learner/trainer and update this documentation.
+        self._time_limit = time_limit
+        self._group_views = group_views
+        self._group_order_on = group_collapse.order_columns if group_views and group_collapse else None
+        if time_limit:
+            logger.log(20, f"Beginning AutoGluon training ... Time limit = {time_limit:.0f}s")
+        else:
+            logger.log(20, "Beginning AutoGluon training ...")
+        if time_limit_preprocessing is not None:
+            if 0 < time_limit_preprocessing < 1:
+                logger.log(
+                    20, f"\tPreprocessing time limit: {time_limit_preprocessing} (fraction of overall time limit)"
+                )
+            else:
+                logger.log(
+                    20,
+                    f"\tPreprocessing time limit: {time_limit_preprocessing:.0f}s (fixed, does not reduce trainer time limit)",
+                )
+        logger.log(20, f'AutoGluon will save models to "{self.path}"')
+        logger.log(20, f"Train Data Rows:    {len(X)}")
+        logger.log(20, f"Train Data Columns: {len([column for column in X.columns if column != self.label])}")
+        if X_val is not None:
+            logger.log(20, f"Tuning Data Rows:    {len(X_val)}")
+            logger.log(20, f"Tuning Data Columns: {len([column for column in X_val.columns if column != self.label])}")
+        logger.log(20, f"Label Column:       {self.label}")
+        time_preprocessing_start = time.time()
+        self._pre_X_rows = len(X)
+        if self.problem_type is None:
+            self.problem_type = self.infer_problem_type(y=X[self.label])
+        logger.log(20, f"Problem Type:       {self.problem_type}")
+        if self._eval_metric_was_str:
+            # Ensure that the eval_metric is valid for the problem_type
+            self._verify_metric(eval_metric=self.eval_metric, problem_type=self.problem_type)
+        if self.groups is not None:
+            # `groups` is the deprecated spelling of `validation_structure={"group_on": ...}`; the
+            # structure itself is built in `TabularPredictor.fit` (DyStack needs it earlier than
+            # here). What remains is reproducing the fold arithmetic the `groups` channel implied:
+            # `CVSplitter` swapped in `LeaveOneGroupOut`, whose partition is exactly grouped k-fold
+            # at k == n_groups with a single repeat (verified for binary, multiclass and regression).
+            num_bag_sets = 1
+            num_bag_folds = len(X[self.groups].unique())
+        X_og = None if infer_limit_batch_size is None else X
+        # Seconds mode: fixed budget, trainer time limit unaffected.
+        # Fraction mode: budget = time_limit * fraction, actual preprocessing time deducted from trainer time limit.
+        preprocessing_time_is_fixed = (time_limit_preprocessing is not None) and (time_limit_preprocessing >= 1)
+        if preprocessing_time_is_fixed:
+            time_limit_for_preprocessing = time_limit_preprocessing
+        elif (time_limit_preprocessing is not None) and (time_limit is not None):
+            time_limit_for_preprocessing = time_limit * time_limit_preprocessing
+        else:
+            time_limit_for_preprocessing = None
+        log_time_str = ""
+        if (
+            (time_limit_for_preprocessing is not None)
+            and (not preprocessing_time_is_fixed)
+            and (time_limit is not None)
+        ):
+            log_time_str = f" for up to {time_limit_for_preprocessing}s of the {time_limit}s of remaining time"
+        elif time_limit_for_preprocessing is not None:
+            log_time_str = f" for up to {time_limit_for_preprocessing}s"
+        logger.log(20, f"Preprocessing data{log_time_str}...")
+        (
+            X,
+            y,
+            X_val,
+            y_val,
+            X_test,
+            y_test,
+            X_unlabeled,
+            holdout_frac,
+            num_bag_folds,
+            num_bag_sets,
+            groups,
+            structure_splits,
+        ) = self.general_data_processing(
+            X=X,
+            X_val=X_val,
+            X_test=X_test,
+            X_unlabeled=X_unlabeled,
+            holdout_frac=holdout_frac,
+            num_bag_folds=num_bag_folds,
+            num_bag_sets=num_bag_sets,
+            use_bag_holdout=trainer_fit_kwargs.get("use_bag_holdout", False),
+            time_limit=time_limit_for_preprocessing,
+            validation_structure=validation_structure,
+            no_validation=no_validation,
+        )
+        if structure_splits is not None:
+            # Every bagged model consumes the same structure-aware splits (CVSplitter reads
+            # `custom_splits` from ag_args_ensemble), so repeats are honored unlike the
+            # groups channel, which forces leave-one-group-out with n_repeats == 1.
+            core_kwargs = dict(trainer_fit_kwargs.get("core_kwargs") or {})
+            ag_args_ensemble = dict(core_kwargs.get("ag_args_ensemble") or {})
+            ag_args_ensemble.setdefault("custom_splits", structure_splits)
+            core_kwargs["ag_args_ensemble"] = ag_args_ensemble
+            trainer_fit_kwargs["core_kwargs"] = core_kwargs
+        if X_og is not None:
+            infer_limit = self._update_infer_limit(
+                X=X_og, infer_limit_batch_size=infer_limit_batch_size, infer_limit=infer_limit
+            )
+
+        self._post_X_rows = len(X)
+        time_preprocessing_end = time.time()
+        self._time_fit_preprocessing = time_preprocessing_end - time_preprocessing_start
+        logger.log(
+            20, f"Data preprocessing and feature engineering runtime = {round(self._time_fit_preprocessing, 2)}s ..."
+        )
+        if time_limit:
+            if preprocessing_time_is_fixed:
+                time_limit_trainer = time_limit
+            else:
+                time_limit_trainer = time_limit - self._time_fit_preprocessing
+        else:
+            time_limit_trainer = None
+
+        trainer = self.trainer_type(
+            path=self.model_context,
+            problem_type=self.label_cleaner.problem_type_transform,
+            eval_metric=self.eval_metric,
+            num_classes=self.label_cleaner.num_classes,
+            quantile_levels=self.quantile_levels,
+            feature_metadata=self._trainer_feature_metadata(),
+            low_memory=self.save_to_disk,  # in memory only: keep every model resident, nothing to reload
+            k_fold=num_bag_folds,  # TODO: Consider moving to fit call
+            n_repeats=num_bag_sets,  # TODO: Consider moving to fit call
+            sample_weight=self.sample_weight,
+            weight_evaluation=self.weight_evaluation,
+            save_data=self.cache_data,  # an in-memory trainer keeps the data in memory instead of pickling it
+            save_to_disk=self.save_to_disk,
+            random_state=self.random_state,
+            verbosity=verbosity,
+            raise_on_model_failure=raise_on_model_failure,
+            group_views=group_views,
+            group_pooling=group_pooling,
+            group_view_kinds=group_view_kinds,
+            group_collapse=group_collapse,
+        )
+
+        self.trainer_path = trainer.path
+        if self.eval_metric is None:
+            self.eval_metric = trainer.eval_metric
+
+        self.save()
+        trainer.fit(
+            X=X,
+            y=y,
+            X_val=X_val,
+            y_val=y_val,
+            X_test=X_test,
+            y_test=y_test,
+            X_unlabeled=X_unlabeled,
+            holdout_frac=holdout_frac,
+            time_limit=time_limit_trainer,
+            infer_limit=infer_limit,
+            infer_limit_batch_size=infer_limit_batch_size,
+            validation_structure=validation_structure,
+            no_validation=no_validation,
+            ensemble_weights=ensemble_weights,
+            ensemble_weights_missing=ensemble_weights_missing,
+            ensemble_hyperparameters=ensemble_hyperparameters,
+            validation_folds=validation_folds,
+            validation_folds_time_reserve=validation_folds_time_reserve,
+            label_cleaner=copy.deepcopy(self.label_cleaner),
+            **trainer_fit_kwargs,
+        )
+        self.save_trainer(trainer=trainer)
+        time_end = time.time()
+        self._time_fit_training = time_end - time_preprocessing_end
+        self._time_fit_total = time_end - time_preprocessing_start
+        log_throughput = ""
+        if trainer.model_best is not None:
+            predict_n_time_per_row = trainer.get_model_attribute_full(
+                model=trainer.model_best, attribute="predict_n_time_per_row"
+            )
+            predict_n_size = trainer.get_model_attribute_full(
+                model=trainer.model_best, attribute="predict_n_size", func=min
+            )
+            if predict_n_time_per_row is not None and predict_n_size is not None:
+                log_throughput = f" | Estimated inference throughput: {1 / (predict_n_time_per_row if predict_n_time_per_row else np.finfo(np.float16).eps):.1f} rows/s ({int(predict_n_size)} batch size)"
+        logger.log(
+            20,
+            f"AutoGluon training complete, total runtime = {round(self._time_fit_total, 2)}s ... Best model: {trainer.model_best}"
+            f"{log_throughput}",
+        )
+
+    def _update_infer_limit(self, X: DataFrame, *, infer_limit_batch_size: int, infer_limit: float = None):
+        """
+        Calculates preprocessing time per row for a given unprocessed data X and infer_limit_batch_size
+        Returns an updated infer_limit if not None with preprocessing time per row subtracted
+        Raises an exception if preprocessing time is greater than or equal to the infer_limit
+        """
+        X_batch = sample_df_for_time_func(df=X, sample_size=infer_limit_batch_size)
+        infer_limit_batch_size_actual = len(X_batch)
+        self.preprocess_1_time = time_func(f=self.transform_features, args=[X_batch]) / infer_limit_batch_size_actual
+        self.preprocess_1_batch_size = infer_limit_batch_size
+        preprocess_1_time_log, time_unit_preprocess_1_time = convert_time_in_s_to_log_friendly(self.preprocess_1_time)
+        logger.log(
+            20,
+            f"\t{round(preprocess_1_time_log, 3)}{time_unit_preprocess_1_time}\t= Feature Preprocessing Time (1 row | {infer_limit_batch_size} batch size)",
+        )
+
+        if infer_limit is not None:
+            infer_limit_new = infer_limit - self.preprocess_1_time
+            infer_limit_log, time_unit_infer_limit = convert_time_in_s_to_log_friendly(infer_limit)
+            infer_limit_new_log, time_unit_infer_limit_new = convert_time_in_s_to_log_friendly(infer_limit_new)
+
+            logger.log(
+                20,
+                f"\t\tFeature Preprocessing requires {round(self.preprocess_1_time / infer_limit * 100, 2)}% "
+                f"of the overall inference constraint ({infer_limit_log}{time_unit_infer_limit})\n"
+                f"\t\t{round(infer_limit_new_log, 3)}{time_unit_infer_limit_new} inference time budget remaining for models...",
+            )
+            if infer_limit_new <= 0:
+                infer_limit_new = 0
+                logger.log(
+                    30,
+                    "WARNING: Impossible to satisfy inference constraint, budget is exceeded during data preprocessing!\n"
+                    "\tAutoGluon will be unable to satisfy the constraint, but will return the fastest model it can.\n"
+                    "\tConsider using fewer features, relaxing the inference constraint, or simplifying the feature generator.",
+                )
+            infer_limit = infer_limit_new
+        return infer_limit
+
+    # TODO: Add default values to X_val, X_unlabeled, holdout_frac, and num_bag_folds
+    def general_data_processing(
+        self,
+        X: DataFrame,
+        X_val: DataFrame = None,
+        X_test: DataFrame = None,
+        X_unlabeled: DataFrame = None,
+        holdout_frac: float = 1,
+        num_bag_folds: int = 0,
+        num_bag_sets: int = 1,
+        use_bag_holdout: bool = False,
+        time_limit: float | None = None,
+        validation_structure=None,
+        no_validation: bool = False,
+    ):
+        """General data processing steps used for all models."""
+        X = self._check_for_non_finite_values(X, name="train", is_train=True)
+        if X_val is not None:
+            X_val = self._check_for_non_finite_values(X_val, name="val", is_train=False)
+        if X_test is not None:
+            X_test = self._check_for_non_finite_values(X_test, name="test", is_train=False)
+
+        holdout_frac_og = holdout_frac
+        if X_val is not None and self.label in X_val.columns:
+            holdout_frac = 1
+
+        if self.eval_metric is not None and self.eval_metric.needs_proba and self.problem_type == MULTICLASS:
+            # Metric requires all classes present in training to be able to compute a score
+            if num_bag_folds > 0:
+                self.threshold = 2
+                # Applied whichever channel declares the grouping. Skipping it when `groups` was
+                # set left that path dropping single-row classes in the cleaner below while the
+                # `validation_structure` path duplicated them, so the two trained on different
+                # data for the same input; duplicating is the one that keeps the class.
+                X = augment_rare_classes(X, self.label, threshold=2)
+                if validation_structure is not None:
+                    # Duplicating rows cannot make a class span a second group, and only that
+                    # gives every fold a class to train on, so report what the threshold could
+                    # not deliver rather than implying it settled the matter.
+                    rare = validation_structure.rare_stratification_values(
+                        X, X[self.label], min_units=2, problem_type=self.problem_type
+                    )
+                    if rare:
+                        logger.warning(
+                            f"WARNING: stratification value(s) "
+                            f"{ {str(k): v for k, v in rare.items()} } occupy fewer than 2 groups, so "
+                            f"one fold will train on none of them. Duplicating rows cannot fix this; "
+                            f"add data in another group or expect those values to be predicted poorly."
+                        )
+            else:
+                self.threshold = 1
+
+        self.threshold, holdout_frac, num_bag_folds = self.adjust_threshold_if_necessary(
+            X[self.label], threshold=self.threshold, holdout_frac=holdout_frac, num_bag_folds=num_bag_folds
+        )
+
+        # Gets labels prior to removal of infrequent classes
+        y_uncleaned = X[self.label].copy()
+
+        self.cleaner = Cleaner.construct(problem_type=self.problem_type, label=self.label, threshold=self.threshold)
+        X = self.cleaner.fit_transform(X)  # TODO: Consider merging cleaner into label_cleaner
+        X, y = self.extract_label(X)
+        self.label_cleaner = LabelCleaner.construct(
+            problem_type=self.problem_type, y=y, y_uncleaned=y_uncleaned, positive_class=self._positive_class
+        )
+        y = self.label_cleaner.transform(y)
+        X = self.set_predefined_weights(X, y)
+        X, w = extract_column(X, self.sample_weight)
+        structure_splits = None
+        structure_holdout = None
+        if validation_structure is not None and num_bag_folds < 2 and X_val is None:
+            # Non-bagged holdout, resolved here for the same reason the bagged path below is:
+            # feature transformation can drop the very columns the structure names (TabArena's
+            # `tabarena_default` pipeline builds aggregate features from the group column and then
+            # drops it), and the trainer's own holdout split runs *after* that. Carving the rows
+            # here, off the raw cleaned frame, hands the trainer explicit validation data so it
+            # never needs to split — and never needs the structure columns to still exist.
+            # `holdout_split_indices` returns None for a stratify-only structure, where
+            # AutoGluon's default holdout already needs no correction.
+            holdout_split = validation_structure.holdout_split_indices(
+                X,
+                y,
+                holdout_frac=holdout_frac,
+                random_state=self.random_state,
+                problem_type=self.problem_type,
+            )
+            if holdout_split is not None:
+                train_idx, val_idx = holdout_split
+                structure_holdout = (X.iloc[val_idx].copy(), y.iloc[val_idx].copy())
+                X, y = X.iloc[train_idx].copy(), y.iloc[train_idx].copy()
+                if w is not None:
+                    w = w.iloc[train_idx].copy()
+                logger.log(
+                    20,
+                    f"Structure-aware holdout: {len(val_idx)} validation rows "
+                    f"(holdout_frac={holdout_frac}); training on {len(X)} rows.",
+                )
+        if validation_structure is not None and num_bag_folds >= 2:
+            # Structure-aware bagging: explicit (train_idx, val_idx) splits, computed on the
+            # raw cleaned frame before feature transformation can alter the referenced
+            # columns. Explicit splits rather than the `groups` channel because that channel
+            # forces leave-one-group-out with n_repeats == 1, ruling out repeated bagging.
+            if use_bag_holdout and X_val is None:
+                # Carve the bag-holdout here, before the splits are resolved, so the split
+                # indices address the rows that actually reach bagging. Resolving splits first
+                # and letting the trainer remove rows afterwards leaves indices pointing past
+                # the end of the reduced frame.
+                bag_holdout_split = validation_structure.holdout_split_indices(
+                    X,
+                    y,
+                    holdout_frac=holdout_frac,
+                    random_state=self.random_state,
+                    problem_type=self.problem_type,
+                    # Bagging follows this carve, so every class must survive into the bagged rows.
+                    min_cls_count_train=2,
+                )
+                if bag_holdout_split is not None:
+                    train_idx, val_idx = bag_holdout_split
+                    structure_holdout = (X.iloc[val_idx].copy(), y.iloc[val_idx].copy())
+                    X, y = X.iloc[train_idx].copy(), y.iloc[train_idx].copy()
+                    if w is not None:
+                        w = w.iloc[train_idx].copy()
+                    logger.log(
+                        20,
+                        f"use_bag_holdout with validation_structure: holding out {len(val_idx)} rows "
+                        f"(structure-aware, holdout_frac={holdout_frac}); bagging over {len(X)} rows.",
+                    )
+            custom_splits, num_bag_folds, num_bag_sets = validation_structure.custom_splits(
+                X,
+                y,
+                num_folds=num_bag_folds,
+                num_repeats=num_bag_sets,
+                random_state=self.random_state,
+                problem_type=self.problem_type,
+            )
+            structure_splits = custom_splits
+        # After the splits are resolved, not before: the structure reads the group/time columns off
+        # `X`, while `groups` additionally requires its column not to be trained on. Dropping it
+        # here satisfies both -- the splits are already computed, and the column never reaches
+        # feature generation.
+        X, groups = extract_column(X, self.groups)
+        if self.label_cleaner.num_classes is not None and self.problem_type != BINARY:
+            logger.log(20, f"Train Data Class Count: {self.label_cleaner.num_classes}")
+
+        X_val, y_val, w_val, holdout_frac = self._apply_cleaner_transform(
+            X=X_val,
+            y_uncleaned=y_uncleaned,
+            holdout_frac=holdout_frac,
+            holdout_frac_og=holdout_frac_og,
+            name="val",
+            is_test=False,
+        )
+        if structure_holdout is not None:
+            # Already label-cleaned (carved off the cleaned frame above), so it skips the cleaner
+            # transform and is handed to the trainer directly -- as its bag-holdout when bagging,
+            # or as its validation data on the non-bagged path.
+            X_val, y_val = structure_holdout
+        X_test, y_test, w_test, _ = self._apply_cleaner_transform(
+            X=X_test,
+            y_uncleaned=y_uncleaned,
+            holdout_frac=holdout_frac,
+            holdout_frac_og=holdout_frac_og,
+            name="test",
+            is_test=True,
+        )
+
+        self._original_features = list(X.columns)
+        # TODO: Move this up to top of data before removing data, this way our feature generator is better
+        logger.log(20, "Using Feature Generators to preprocess the data ...")
+
+        if X_test is not None:
+            logger.log(
+                15,
+                "Performing general data preprocessing with merged train & validation data, so validation/test performance may not accurately reflect performance on new test data",
+            )
+
+        # TODO: extend this boolean flag into learner init parameter
+        transform_with_test = False
+
+        X_test_super = None
+        y_test_super = None
+        if transform_with_test:
+            X_test_super = X_test
+            y_test_super = y_test
+
+        # Computed off the raw frames: feature generation may transform or drop the `group_on` columns.
+        group_keys = (
+            [None if data is None else group_codes(data, self._group_views) for data in (X, X_val, X_test)]
+            if self._group_views
+            else None
+        )
+        group_orders = (
+            [None if data is None else group_order(data, self._group_order_on) for data in (X, X_val, X_test)]
+            if self._group_order_on
+            else None
+        )
+
+        datasets = [X, X_val, X_test_super, X_unlabeled]
+        X_super = pd.concat(datasets, ignore_index=True)
+
+        if self.feature_generator.is_fit():
+            logger.log(
+                20,
+                f"{self.feature_generator.__class__.__name__} is already fit, so the training data will be processed via .transform() instead of .fit_transform().",
+            )
+            X_super = self.feature_generator.transform(X_super)
+            if not transform_with_test and X_test is not None:
+                X_test = self.feature_generator.transform(X_test)
+            self.feature_generator.print_feature_metadata_info()
+        else:
+            y_unlabeled = pd.Series(np.nan, index=X_unlabeled.index) if X_unlabeled is not None else None
+            y_list = [y, y_val, y_test_super, y_unlabeled]
+            y_super = pd.concat(y_list, ignore_index=True)
+            X_super = self.fit_transform_features(
+                X_super,
+                y_super,
+                problem_type=self.label_cleaner.problem_type_transform,
+                eval_metric=self.eval_metric,
+                time_limit=time_limit,
+            )
+            if not transform_with_test and X_test is not None:
+                X_test = self.feature_generator.transform(X_test)
+
+        idx = 0
+        for i in range(len(datasets)):
+            if datasets[i] is not None:
+                length = len(datasets[i])
+                datasets[i] = X_super.iloc[idx : idx + length].set_index(datasets[i].index)
+                idx += length
+
+        X, X_val, X_test_super, X_unlabeled = datasets
+        del X_super
+
+        if transform_with_test:
+            X_test = X_test_super
+
+        if group_keys is not None:
+            X, X_val, X_test = (
+                data if data is None else data.assign(**{GROUP_KEY_COLUMN: keys})
+                for data, keys in zip((X, X_val, X_test), group_keys)
+            )
+        if group_orders is not None:
+            X, X_val, X_test = (
+                data if data is None else data.assign(**{GROUP_ORDER_COLUMN: orders})
+                for data, orders in zip((X, X_val, X_test), group_orders)
+            )
+
+        # TODO: consider not bundling sample-weights inside X, X_val
+        X = self.bundle_weights(X, w, "X", is_train=True)
+        X_val = self.bundle_weights(X_val, w_val, "X_val", is_train=False)
+        X_test = self.bundle_weights(X_test, w_test, "X_test", is_train=False)
+        return (
+            X,
+            y,
+            X_val,
+            y_val,
+            X_test,
+            y_test,
+            X_unlabeled,
+            holdout_frac,
+            num_bag_folds,
+            num_bag_sets,
+            groups,
+            structure_splits,
+        )
+
+    def _trainer_feature_metadata(self) -> FeatureMetadata:
+        """The metadata of the features the trainer receives: the generated features, plus the group key (and the
+        rows' order within groups, with `order_on`) under group views."""
+        feature_metadata = self.feature_generator.feature_metadata
+        if self._group_views:
+            feature_metadata = feature_metadata.join_metadata(
+                group_key_feature_metadata(order=self._group_order_on is not None)
+            )
+        return feature_metadata
+
+    def bundle_weights(self, X: DataFrame | None, w: Series | None, name: str, is_train=False) -> DataFrame:
+        if is_train:
+            if w is not None:
+                X[self.sample_weight] = w
+        elif X is not None:
+            if w is not None:
+                X[self.sample_weight] = w
+            elif not self.weight_evaluation:
+                nan_vals = np.empty((len(X),))
+                nan_vals[:] = np.nan
+                X[self.sample_weight] = nan_vals
+            else:
+                raise ValueError(
+                    f"sample_weight column '{self.sample_weight}' \
+                                 cannot be missing from {name} dataset if weight_evaluation=True"
+                )
+
+        return X
+
+    def set_predefined_weights(self, X, y):
+        if self.sample_weight not in [AUTO_WEIGHT, BALANCE_WEIGHT] or self.problem_type not in [BINARY, MULTICLASS]:
+            return X
+        if self.sample_weight in X.columns:
+            raise ValueError(
+                f"Column name '{self.sample_weight}' cannot appear in your dataset with predefined weighting strategy. Please change it and try again."
+            )
+        if self.sample_weight == BALANCE_WEIGHT:
+            if self.class_weights is None:
+                class_counts = y.value_counts()
+                n = len(y)
+                k = len(class_counts)
+                self.class_weights = {c: n / (class_counts[c] * k) for c in class_counts.index}
+                logger.log(20, "Assigning sample weights to balance differences in frequency of classes.")
+                logger.log(15, f"Balancing classes via the following weights: {self.class_weights}")
+            w = y.map(self.class_weights)
+        elif self.sample_weight == AUTO_WEIGHT:  # TODO: support more sophisticated auto_weight strategy
+            raise NotImplementedError(f"{AUTO_WEIGHT} strategy not yet supported.")
+        X[self.sample_weight] = w  # TODO: consider not bundling sample weights inside X
+        return X
+
+    def _check_for_non_finite_values(self, X: DataFrame, name: str = "", is_train: bool = False) -> DataFrame:
+        if is_train or (X is not None and self.label in X.columns):
+            X = copy.deepcopy(X)
+
+            # treat None, NaN, INF, NINF as NA
+            # The option context keeps `replace` from downcasting internally (which logs the
+            # "Downcasting behavior in `replace` is deprecated" FutureWarning whenever the label
+            # arrives as a numeric-valued object column); `.infer_objects(copy=False)` then applies
+            # the same downcast explicitly, so values and dtype match the pre-pandas-2.2 behavior.
+            with pd.option_context("future.no_silent_downcasting", True):
+                X[self.label] = X[self.label].replace([np.inf, -np.inf], np.nan).infer_objects(copy=False)
+            invalid_labels = X[self.label].isna()
+            if invalid_labels.any():
+                first_invalid_label_idx = invalid_labels.idxmax()
+                raise ValueError(
+                    f"{name} dataset label column cannot contain non-finite values (NaN, Inf, Ninf). First invalid label at data idx: {first_invalid_label_idx}"
+                )
+
+        return X
+
+    def _apply_cleaner_transform(
+        self,
+        X: DataFrame,
+        y_uncleaned: Series,
+        holdout_frac: float | int,
+        holdout_frac_og: float | int,
+        name: str,
+        is_test: bool = False,
+    ) -> tuple[DataFrame, Series, Series | None, float | int]:
+        if X is not None and self.label in X.columns:
+            y_og = X[self.label]
+            len_og = len(X) if is_test else None
+            X = self.cleaner.transform(X)
+            if is_test and len(X) != len_og:
+                # FIXME: Currently, there are ways in which this code can be reached (@innixma)
+                raise AssertionError(
+                    f"{name} cannot have low frequency classes! Please create a GitHub issue if you see this message, as it should never occur."
+                )
+
+            if len(X) == 0:
+                logger.warning(
+                    "############################################################################################################\n"
+                    f"WARNING: All {name} data contained low frequency classes, ignoring {name} and generating from subset of X\n"
+                    "\tYour input validation data or training data labels might be corrupted, please manually inspect them for correctness!"
+                )
+                if self.problem_type in [BINARY, MULTICLASS]:
+                    train_classes = sorted(list(y_uncleaned.unique()))
+                    val_classes = sorted(list(y_og.unique()))
+                    logger.warning(f"\ttrain Classes: {train_classes}")
+                    logger.warning(f"\t{name}   Classes: {val_classes}")
+                    logger.warning(f"\ttrain Class Dtype: {y_uncleaned.dtype}")
+                    logger.warning(f"\t{name}   Class Dtype: {y_og.dtype}")
+                    missing_classes = [c for c in val_classes if c not in train_classes]
+                    logger.warning(f"\tClasses missing from Training Data: {missing_classes}")
+                logger.warning(
+                    "############################################################################################################"
+                )
+
+                X = None
+                y = None
+                w = None
+                holdout_frac = holdout_frac_og
+            else:
+                X, y = self.extract_label(X)
+                y = self.label_cleaner.transform(y)
+                X = self.set_predefined_weights(X, y)
+                X, w = extract_column(X, self.sample_weight)
+        else:
+            y = None
+            w = None
+
+        return X, y, w, holdout_frac
+
+    def adjust_threshold_if_necessary(self, y, threshold, holdout_frac, num_bag_folds):
+        new_threshold, new_holdout_frac, new_num_bag_folds = self._adjust_threshold_if_necessary(
+            y, threshold, holdout_frac, num_bag_folds
+        )
+        if new_threshold != threshold:
+            if new_threshold < threshold:
+                logger.warning(
+                    f"Warning: Updated label_count_threshold from {threshold} to {new_threshold} to avoid cutting too many classes."
+                )
+        if new_holdout_frac != holdout_frac:
+            if new_holdout_frac > holdout_frac:
+                logger.warning(
+                    f"Warning: Updated holdout_frac from {holdout_frac} to {new_holdout_frac} to avoid cutting too many classes."
+                )
+        if new_num_bag_folds != num_bag_folds:
+            logger.warning(
+                f"Warning: Updated num_bag_folds from {num_bag_folds} to {new_num_bag_folds} to avoid cutting too many classes."
+            )
+        return new_threshold, new_holdout_frac, new_num_bag_folds
+
+    def _adjust_threshold_if_necessary(self, y, threshold, holdout_frac, num_bag_folds):
+        new_threshold = threshold
+        num_rows = len(y)
+        holdout_frac = max(holdout_frac, 1 / num_rows + 0.001)
+        num_bag_folds = min(num_bag_folds, num_rows)
+
+        if num_bag_folds < 2:
+            minimum_safe_threshold = 1
+        else:
+            minimum_safe_threshold = 2
+
+        if minimum_safe_threshold > new_threshold:
+            new_threshold = minimum_safe_threshold
+
+        if self.problem_type in [REGRESSION, QUANTILE]:
+            return new_threshold, holdout_frac, num_bag_folds
+
+        class_counts = y.value_counts()
+        total_rows = class_counts.sum()
+        minimum_percent_to_keep = 0.975
+        minimum_rows_to_keep = math.ceil(total_rows * minimum_percent_to_keep)
+        minimum_class_to_keep = 2
+
+        num_classes = len(class_counts)
+        class_counts_valid = class_counts[class_counts >= new_threshold]
+        num_rows_valid = class_counts_valid.sum()
+        num_classes_valid = len(class_counts_valid)
+
+        if (num_rows_valid >= minimum_rows_to_keep) and (num_classes_valid >= minimum_class_to_keep):
+            return new_threshold, holdout_frac, num_bag_folds
+
+        num_classes_valid = 0
+        num_rows_valid = 0
+        new_threshold = None
+        for i in range(num_classes):
+            num_classes_valid += 1
+            num_rows_valid += class_counts.iloc[i]
+            new_threshold = class_counts.iloc[i]
+            if (num_rows_valid >= minimum_rows_to_keep) and (num_classes_valid >= minimum_class_to_keep):
+                break
+
+        return new_threshold, holdout_frac, num_bag_folds
+
+    def get_info(self, include_model_info=False, include_model_failures=False, **kwargs):
+        learner_info = super().get_info(**kwargs)
+        trainer = self.load_trainer()
+        trainer_info = trainer.get_info(
+            include_model_info=include_model_info, include_model_failures=include_model_failures
+        )
+        learner_info.update(
+            {
+                "time_fit_preprocessing": self._time_fit_preprocessing,
+                "time_fit_training": self._time_fit_training,
+                "time_fit_total": self._time_fit_total,
+                "time_limit": self._time_limit,
+            }
+        )
+
+        learner_info.update(trainer_info)
+        return learner_info

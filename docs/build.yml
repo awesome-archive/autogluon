@@ -1,11 +1,15 @@
-name: autogluon_py3
 dependencies:
-- python=3.7
-- graphviz
+- python=3.10
+- pip
 - pip:
-  - jupyter-sphinx>=0.2.2
-  - mxnet-cu100==1.5.0b20190331
-  - portalocker
-  - nose
-  - docutils
-  - mu-notedown
+  - ruff
+  - sphinx
+  - furo
+  - myst_parser
+  - myst-nb
+  - sphinx-material
+  - sphinx-togglebutton
+  - sphinx-copybutton
+  - sphinx-design
+  - sphinx-inline-tabs
+  - sphinxcontrib-googleanalytics
